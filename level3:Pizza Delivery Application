@@ -1,0 +1,154 @@
+// Import necessary modules
+const express = require('express');
+const mongoose = require('mongoose');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const nodemailer = require('nodemailer');
+const Razorpay = require('razorpay');
+const socketIo = require('socket.io');
+
+// Initialize app and database
+const app = express();
+const PORT = process.env.PORT || 5000;
+
+// Middleware
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// MongoDB connection
+mongoose.connect('mongodb://localhost:27017/pizzaDeliveryApp', {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+});
+const db = mongoose.connection;
+db.on('error', console.error.bind(console, 'connection error:'));
+db.once('open', () => console.log('Connected to MongoDB'));
+
+// User Schema
+const userSchema = new mongoose.Schema({
+  name: String,
+  email: { type: String, unique: true },
+  password: String,
+  role: { type: String, default: 'user' },
+  isVerified: { type: Boolean, default: false },
+});
+const User = mongoose.model('User', userSchema);
+
+// Pizza Schema
+const pizzaSchema = new mongoose.Schema({
+  base: String,
+  sauce: String,
+  cheese: String,
+  veggies: [String],
+  price: Number,
+});
+const Pizza = mongoose.model('Pizza', pizzaSchema);
+
+// Order Schema
+const orderSchema = new mongoose.Schema({
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  pizza: [pizzaSchema],
+  status: { type: String, default: 'Order Received' },
+  createdAt: { type: Date, default: Date.now },
+});
+const Order = mongoose.model('Order', orderSchema);
+
+// Inventory Schema
+const inventorySchema = new mongoose.Schema({
+  item: String,
+  quantity: Number,
+  threshold: Number,
+});
+const Inventory = mongoose.model('Inventory', inventorySchema);
+
+// Razorpay instance
+const razorpay = new Razorpay({
+  key_id: 'YOUR_KEY_ID',
+  key_secret: 'YOUR_KEY_SECRET',
+});
+
+// Registration
+app.post('/register', async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = new User({ name, email, password: hashedPassword });
+    await user.save();
+
+    // Send verification email
+    const transporter = nodemailer.createTransport({
+      service: 'Gmail',
+      auth: { user: 'your-email@gmail.com', pass: 'your-email-password' },
+    });
+
+    const mailOptions = {
+      from: 'your-email@gmail.com',
+      to: email,
+      subject: 'Verify Your Email',
+      text: 'Click on the link to verify your email: http://localhost:5000/verify-email',
+    };
+    transporter.sendMail(mailOptions);
+
+    res.status(201).json({ message: 'User registered. Check your email for verification.' });
+  } catch (error) {
+    res.status(400).json({ error: 'Error registering user' });
+  }
+});
+
+// Login
+app.post('/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
+
+    const token = jwt.sign({ id: user._id, role: user.role }, 'secretKey', { expiresIn: '1d' });
+    res.json({ token, user });
+  } catch (error) {
+    res.status(500).json({ error: 'Error logging in' });
+  }
+});
+
+// Get Pizza Options
+app.get('/pizzas', async (req, res) => {
+  try {
+    const pizzas = await Pizza.find();
+    res.json(pizzas);
+  } catch (error) {
+    res.status(500).json({ error: 'Error fetching pizzas' });
+  }
+});
+
+// Place Order
+app.post('/order', async (req, res) => {
+  try {
+    const { userId, pizza } = req.body;
+    const order = new Order({ user: userId, pizza });
+    await order.save();
+    res.status(201).json({ message: 'Order placed successfully', order });
+  } catch (error) {
+    res.status(500).json({ error: 'Error placing order' });
+  }
+});
+
+// Update Inventory after Order
+app.post('/update-inventory', async (req, res) => {
+  try {
+    const { items } = req.body;
+    for (const item of items) {
+      await Inventory.updateOne(
+        { item: item.name },
+        { $inc: { quantity: -item.quantity } }
+      );
+    }
+    res.json({ message: 'Inventory updated' });
+  } catch (error) {
+    res.status(500).json({ error: 'Error updating inventory' });
+  }
+});
+
+// Start Server
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
